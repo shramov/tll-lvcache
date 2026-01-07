@@ -1,0 +1,17 @@
+[package]
+name = "tll-lvcache"
+version = "0.1.0"
+authors = ["Pavel Shramov <shramov@mexmat.net>"]
+edition = "2018"
+license = "MIT"
+
+[dependencies]
+#tll = { path = "tll-rs", version = ">= 0.0.0" }
+tll = { path = "../tll-rs", version = ">= 0.0.0" }
+bytes = "= 1"
+im-rc = "= 15"
+serde_core = "= 1.0"
+serde_json = { version = "= 1.0" }
+
+[lib]
+crate-type = ["cdylib"]
