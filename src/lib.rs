@@ -13,6 +13,7 @@ pub mod cache;
 pub mod http_scheme;
 pub mod json;
 pub mod rest;
+pub mod store;
 
 use crate::cache::*;
 use crate::rest::LVRest;
@@ -23,7 +24,7 @@ type IterType = std::iter::Flatten<std::collections::hash_map::IntoValues<i32, M
 struct LVCache {
     base: Base,
     seq: i64,
-    writer: Option<OwnedChannel>,
+    storage: Option<store::Storage>,
     messages: std::collections::HashMap<i32, Map>,
     messages_init: Vec<(String, Vec<String>)>,
     master: Option<Channel>,
@@ -86,16 +87,7 @@ impl ChannelImpl for LVCache {
 
         let chain = self.config_chain(url);
         if let Some(filename) = chain.get("filename") {
-            let mut cfg = Config::new();
-            cfg.set("tll.proto", "file");
-            cfg.set("tll.host", &filename);
-            cfg.set("tll.internal", "yes");
-            cfg.set("name", &format!("{}/writer", self.base.name()));
-            cfg.set("dump", "yes");
-            cfg.set("dir", "w");
-            cfg.set("scheme", &self.base().scheme_url.as_ref().unwrap());
-            self.writer =
-                Some(self.base.context().channel_url(&cfg).map_err(|_| Error::from("Failed to create writer channel"))?);
+            self.storage = Some(store::Storage::new(filename, &self.base)?);
         }
 
         self.base_mut().scheme_control = Some(tll::scheme::Scheme::new(block_scheme::SCHEME_STRING)?);
@@ -140,6 +132,9 @@ impl ChannelImpl for LVCache {
             self.messages = self.build_map(&Scheme::from(scheme))?;
         } else {
             return Err(Error::from("Scheme is mandatory for aggregation channel"));
+        }
+        if let Some(s) = self.storage.as_mut() {
+            self.seq = s.read(&mut self.messages).map_err(|e| format!("Failed to load messagess: {e}"))?;
         }
         Ok(())
     }
@@ -194,22 +189,14 @@ impl LVCache {
             return Ok(());
         }
 
-        if let Some(w) = self.writer.as_mut() {
-            if w.state() != State::Closed {
-                w.close();
-            }
-            let total: i64 = self.messages.values().map(|e| e.map.len() as i64).sum();
-            let mut seq = self.seq - total;
-            let mut m = Message::new();
-            w.open(Some("overwrite=yes"))?;
-            for e in self.messages.values() {
-                for v in e.map.values() {
-                    unsafe { std::ptr::copy(v.deref().deref().deref(), &mut m, 1) };
-                    w.post(m.set_seq(seq))?;
-                    seq += 1;
+        if self.seq >= 0 {
+            if let Some(s) = self.storage.as_mut() {
+                let total: i64 = self.messages.values().map(|e| e.map.len() as i64).sum();
+                let iter = self.messages.values().flatten().map(|(_, v)| v.msg.deref());
+                if let Err(e) = s.write(self.seq - total + 1, iter) {
+                    tll::error!(self, "Failed to write data: {e}")
                 }
             }
-            w.close();
         }
         Ok(())
     }

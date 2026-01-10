@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::str::FromStr;
 
 use bytes::BufMut;
@@ -7,13 +8,14 @@ use tll::channel::*;
 
 use tll::bind::Binder;
 use tll::channel::base::*;
-use tll::config::Config;
+use tll::config::{Config, ConfigValue};
 use tll::scheme::native::{Field, Scheme, Type};
 use tll::{Error, Result};
 
 use crate::cache::*;
 use crate::http_scheme;
 use crate::json::JSON;
+use crate::store::Storage;
 
 type IterType = std::iter::Flatten<std::collections::hash_map::IntoValues<i32, Map>>;
 
@@ -34,10 +36,21 @@ struct Client {
     filter: Option<Filter>,
 }
 
+#[repr(transparent)]
+#[derive(Debug, Default, Copy, Clone)]
+struct OpenMode(i64);
+
+impl ToString for OpenMode {
+    fn to_string(&self) -> String {
+        if self.0 == -1 { "initial" } else { "seq-data" }.to_owned()
+    }
+}
+
 #[derive(Default)]
 pub struct LVRest {
     base: Base,
-    seq: i64,
+    seq: ConfigValue<i64>,
+    open_mode: ConfigValue<OpenMode>,
     messages: std::collections::HashMap<i32, Map>,
     messages_init: Vec<(String, Vec<String>)>,
     filters: std::collections::HashMap<String, Filter>,
@@ -49,6 +62,7 @@ pub struct LVRest {
     msgid_disconnect: i32,
     input: Option<Channel>,
     output: Option<Channel>,
+    storage: Option<Storage>,
     buf: Vec<u8>,
 }
 
@@ -101,6 +115,7 @@ impl ChannelImpl for LVRest {
 
     fn init(&mut self, url: &Config, master: Option<Channel>, context: &Context) -> Result<()> {
         self.inner_mut().init(url, master, context)?;
+        self.open_mode = unsafe { &*(&self.seq as *const ConfigValue<i64> as *const ConfigValue<OpenMode>) }.clone();
 
         for (key, cfg) in url.browse("message.*") {
             let name = &key["message.".len()..];
@@ -164,14 +179,19 @@ impl ChannelImpl for LVRest {
         } else {
             return Err(Error::from("Output channel not found"));
         }
+        if let Some(name) = url.get("filename") {
+            self.storage = Some(Storage::new(name, &self.base)?);
+        }
 
         Ok(())
     }
 
     fn open(&mut self, cfg: &Config) -> Result<()> {
         self.inner_mut().open(cfg)?;
+        self.base.config.set_ptr("info.open.seq", &self.seq)?;
+        self.base.config.set_ptr("info.open.mode", &self.open_mode)?;
 
-        self.seq = -1;
+        self.seq.set(-1);
         if let Some(scheme) = self.base.scheme_data.as_ref().map(Scheme::from) {
             self.messages = self.build_map(&scheme)?;
             self.filters = self.build_filters(&scheme)?;
@@ -186,6 +206,10 @@ impl ChannelImpl for LVRest {
         } else {
             return Err(Error::from("Control scheme not found on output"));
         }
+
+        if let Some(s) = self.storage.as_mut() {
+            self.seq.set(s.read(&mut self.messages).map_err(|e| format!("Failed to load messagess: {e}"))?);
+        }
         Ok(())
     }
 
@@ -196,9 +220,20 @@ impl ChannelImpl for LVRest {
                 tll::info!(self, "Message {}", v.seq);
             }
         }
+        if self.seq.get() >= 0 {
+            if let Some(s) = self.storage.as_mut() {
+                let total: i64 = self.messages.values().map(|e| e.map.len() as i64).sum();
+                let iter = self.messages.values().flatten().map(|(_, v)| v.msg.deref());
+                if let Err(e) = s.write(self.seq.get() - total + 1, iter) {
+                    tll::error!(self, "Failed to write data: {e}")
+                }
+            }
+        }
         self.messages.clear();
         self.clients.clear();
         self.clients_drop.clear();
+        self.base.config.set("info.open.seq", &self.seq.get().to_string());
+        self.base.config.set("info.open.mode", &self.open_mode.get().to_string());
     }
 
     fn free(&mut self) -> () {
@@ -277,7 +312,7 @@ impl LVRest {
             return Ok(());
         }
         if let Some(entry) = self.messages.get_mut(&msg.msgid()) {
-            self.seq = std::cmp::max(self.seq, msg.seq);
+            self.seq.set(msg.seq());
             entry.update(msg)
         } else {
             Ok(())
@@ -311,7 +346,7 @@ impl LVRest {
                 addr,
                 Client {
                     addr,
-                    seq: self.seq - total,
+                    seq: self.seq.get() - total + 1,
                     iter: messages.into_values().flatten(),
                     filter: flt,
                     sent: 0,

@@ -89,12 +89,16 @@ channel:
     mock.open()
 
     r, w = mock.io('output', 'input')
+    assert mock.channel.config['info.open.seq'] == '-1'
+    assert mock.channel.config['info.open.mode'] == 'initial'
 
     for i in range(10):
         for k in range(3):
             w.post({'f0': k, 'f1': 'k0', 'f2': 'b0', 'data': f'f-{i}-{k}'}, name='First', seq=100 * i + 10 * k)
             w.post({'header': {'h0': k}, 'data': [f's-{i}-{k}']}, name='Second', seq=100 * i + 10 * k + 1)
             w.post({'f0': k, 'data': f't-{i}-{k}'}, name='Third', seq=100 * i + 10 * k + 2)
+        assert mock.channel.config['info.open.seq'] == str(100 * i + 21)
+        assert mock.channel.config['info.open.mode'] == 'seq-data'
 
         assert mock.channel.dcaps == mock.channel.DCaps.Zero
         r.post({}, name='Connect', type=w.Type.Control, addr=10)
@@ -111,6 +115,25 @@ channel:
                 [{'f0': k, 'f1': 'k0', 'f2': 'YjAAAA==', 'data': f'f-{i}-{k}'} for k in range(3)];
 
         assert sorted(json.loads(data), key=lambda x: str(x.get('data'))) == compare
+
+    r.post({'path': '/path/?Second=2'}, name='Connect', type=w.Type.Control, addr=10)
+    data = b''
+    for _ in range(30):
+        if data.endswith(b']'): break
+        m = await r.recv(0.001)
+        if m.type == m.Type.Data:
+            data += m.data.tobytes()
+
+    compare = [{'header': {'h0': k}, 'f0': 0, 'data': [f's-{i}-{k}']} for k in range(3)] + \
+            [{'f0': k, 'f1': 'k0', 'f2': 'YjAAAA==', 'data': f'f-{i}-{k}'} for k in range(3)]
+
+    assert sorted(json.loads(data), key=lambda x: str(x.get('data'))) == [{'header': {'h0': k}, 'f0': 0, 'data': [f's-{i}-{k}']} for k in [2]]
+
+    mock.channel.close()
+    mock.channel.open()
+
+    assert mock.channel.config['info.open.seq'] == str(100 * 9 + 21)
+    assert mock.channel.config['info.open.mode'] == 'seq-data'
 
     r.post({'path': '/path/?Second=2'}, name='Connect', type=w.Type.Control, addr=10)
     data = b''

@@ -29,6 +29,7 @@ impl Body {
 }
 
 pub type MsgMap = im_rc::HashMap<Key, Rc<Body>>;
+pub type MapMap = std::collections::HashMap<i32, Map>;
 
 #[derive(Debug, Clone)]
 pub struct Map {
@@ -36,6 +37,15 @@ pub struct Map {
     pub key: Vec<Field>,
     pub key_size: usize,
     pub name: String,
+}
+
+impl<'a> std::iter::IntoIterator for &'a Map {
+    type Item = <&'a MsgMap as IntoIterator>::Item;
+    type IntoIter = <&'a MsgMap as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.map.iter()
+    }
 }
 
 impl std::iter::IntoIterator for Map {
