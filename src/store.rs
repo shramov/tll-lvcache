@@ -67,17 +67,12 @@ impl Storage {
             return Ok(-1);
         }
         let mut mapref = MapRef { seq: -1, map: messages };
-        self.reader.callback_add_mut::<MapRef<'a>, ()>(&mut mapref, Some(MsgMask::Data as u32))?;
-        let r = Self::_read(&mut self.reader);
-        self.reader.callback_del_mut::<MapRef<'a>, ()>(&mut mapref, Some(MsgMask::Data as u32))?;
-        r.map(|_| mapref.seq)
-    }
-
-    fn _read(channel: &mut Channel) -> Result<(), tll::Error> {
-        channel.open(None)?;
-        while channel.state() == State::Active {
-            channel.process()?;
+        let _cb = self.reader.callback_add_mut::<MapRef<'a>, ()>(&mut mapref, Some(MsgMask::Data as u32))?;
+        self.reader.open(None)?;
+        while self.reader.state() == State::Active {
+            self.reader.process()?;
         }
-        Ok(())
+        self.reader.close();
+        Ok(mapref.seq)
     }
 }
