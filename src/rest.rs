@@ -8,6 +8,7 @@ use tll::channel::*;
 
 use tll::bind::Binder;
 use tll::channel::base::*;
+use tll::channel::logic::Logic;
 use tll::config::{Config, ConfigValue};
 use tll::scheme::native::{Field, Scheme, Type};
 use tll::{Error, Result};
@@ -60,8 +61,8 @@ pub struct LVRest {
     json: JSON,
     msgid_connect: i32,
     msgid_disconnect: i32,
-    input: Option<Channel>,
-    output: Option<Channel>,
+    input: Logic,
+    output: Logic,
     storage: Option<Storage>,
     buf: Vec<u8>,
 }
@@ -149,36 +150,16 @@ impl ChannelImpl for LVRest {
             return Err(Error::from("Channel needs scheme"));
         }
 
-        let inputs: Vec<_> = url
-            .get("tll.channel.input")
-            .unwrap_or("".to_owned())
-            .split(",")
-            .map(|x| x.trim().to_owned())
-            .collect();
-        if inputs.len() != 1 {
-            return Err(Error::from("Needs exactly one input"));
-        }
-        if let Some(mut c) = context.get(&inputs[0]) {
-            c.callback_add_mut::<Self, InputCallback>(self, None)?;
-            self.input = Some(c)
-        } else {
-            return Err(Error::from("Input channel not found"));
-        }
-        let outputs: Vec<_> = url
-            .get("tll.channel.output")
-            .unwrap_or("".to_owned())
-            .split(",")
-            .map(|x| x.trim().to_owned())
-            .collect();
-        if outputs.len() != 1 {
-            return Err(Error::from("Needs exactly one output"));
-        }
-        if let Some(mut c) = context.get(&outputs[0]) {
-            c.callback_add_mut::<Self, OutputCallback>(self, Some(MsgMask::Control as u32))?;
-            self.output = Some(c);
-        } else {
-            return Err(Error::from("Output channel not found"));
-        }
+        self.input = Logic::new(context, url, "input")?
+            .at_least(1)?
+            .at_most(1)?
+            .with_callback_mut::<Self, InputCallback>(self, MsgMask::All)?;
+
+        self.output = Logic::new(context, url, "output")?
+            .at_least(1)?
+            .at_most(1)?
+            .with_callback_mut::<Self, OutputCallback>(self, MsgMask::Control)?;
+
         if let Some(name) = url.get("filename") {
             self.storage = Some(Storage::new(name, &self.base)?);
         }
@@ -199,7 +180,7 @@ impl ChannelImpl for LVRest {
         } else {
             return Err(Error::from("Scheme is mandatory for aggregation channel"));
         }
-        if let Some(s) = self.output.and_then(|x| x.scheme_control()) {
+        if let Some(s) = self.output[0].scheme_control() {
             self.msgid_connect = s.messages().find(|x| x.name() == "Connect").ok_or(Error::from("No Connect message"))?.msgid();
             self.msgid_disconnect =
                 s.messages().find(|x| x.name() == "Disconnect").ok_or(Error::from("No Disconnect message"))?.msgid();
@@ -237,13 +218,13 @@ impl ChannelImpl for LVRest {
     }
 
     fn free(&mut self) -> () {
-        self.input.map(|mut x| x.callback_del_mut::<Self, InputCallback>(self, None));
-        self.output.map(|mut x| x.callback_del_mut::<Self, OutputCallback>(self, None));
+        self.input.clear();
+        self.output.clear();
         self.base.free()
     }
 
     fn process(&mut self) -> Result<i32> {
-        let mut output = self.output.unwrap();
+        let mut output = self.output[0];
 
         for addr in self.clients_drop.drain(..) {
             tll::debug!(&self.base, "Drop client {}", addr);
