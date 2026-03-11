@@ -67,7 +67,7 @@ impl Storage {
             return Ok(-1);
         }
         let mut mapref = MapRef { seq: -1, map: messages };
-        let _cb = self.reader.callback_add_mut::<MapRef<'a>, ()>(&mut mapref, Some(MsgMask::Data as u32))?;
+        let _cb = self.reader.callback_add_mut::<MapRef<'a>, ()>(&mut mapref, MsgMask::Data)?;
         self.reader.open(None)?;
         while self.reader.state() == State::Active {
             self.reader.process()?;
