@@ -26,7 +26,7 @@ struct LVCache {
     seq: i64,
     storage: Option<store::Storage>,
     messages: std::collections::HashMap<i32, Map>,
-    messages_init: Vec<(String, Vec<String>)>,
+    messages_init: Vec<MapParam>,
     master: Option<Channel>,
     iter: IterType,
 }
@@ -66,20 +66,7 @@ impl ChannelImpl for LVCache {
             return Ok(());
         }
 
-        for (key, cfg) in url.browse("message.*") {
-            let name = &key["message.".len()..];
-            if let Some(v) = cfg.get_self() {
-                let fields: Vec<String> = v.split(",").map(|x| x.trim().to_owned()).collect();
-                for f in &fields {
-                    if f == "" {
-                        return Err(Error::from(format!("Empty field name for message '{}'", name)));
-                    }
-                }
-                self.messages_init.push((name.to_owned(), fields));
-            } else {
-                return Err(Error::from(format!("Can not get value for {}", name)));
-            }
-        }
+        self.messages_init = parse_params(url)?;
 
         if self.base().scheme_url.is_none() {
             return Err(Error::from("Channel needs scheme"));
@@ -203,10 +190,10 @@ impl LVCache {
 
     fn build_map(&self, scheme: &tll::scheme::native::Scheme) -> Result<std::collections::HashMap<i32, Map>> {
         let mut r = std::collections::HashMap::<i32, Map>::new();
-        for (name, fields) in &self.messages_init {
-            tll::debug!(self, "Prepare map for {}", name);
+        for param in &self.messages_init {
+            tll::debug!(self, "Prepare map for {}", param.name);
             let m =
-                Map::new(scheme, name, fields).map_err(|e| Error::from(format!("Failed to build message '{}': {}", name, e)))?;
+                Map::new(scheme, param).map_err(|e| Error::from(format!("Failed to build message '{}': {}", param.name, e)))?;
             r.insert(m.0, m.1);
         }
         Ok(r)

@@ -32,10 +32,24 @@ pub type MsgMap = im_rc::HashMap<Key, Rc<Body>>;
 pub type MapMap = std::collections::HashMap<i32, Map>;
 
 #[derive(Debug, Clone)]
+pub struct MapParam {
+    pub name: String,
+    pub key: Vec<String>,
+    pub erase: Option<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EraseKey {
+    pub field: Field,
+    pub key: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Map {
     pub map: MsgMap,
     pub key: Vec<Field>,
     pub key_size: usize,
+    pub erase: Option<EraseKey>,
     pub name: String,
 }
 
@@ -58,22 +72,28 @@ impl std::iter::IntoIterator for Map {
 }
 
 impl Map {
-    pub fn new(scheme: &Scheme, name: &str, fields: &Vec<String>) -> Result<(i32, Map)> {
-        let message = scheme.messages.iter().find(|m| m.name == name).ok_or(Error::from("Not found in scheme"))?;
+    pub fn new(scheme: &Scheme, param: &MapParam) -> Result<(i32, Map)> {
+        let message = scheme.messages.iter().find(|m| m.name == param.name).ok_or(Error::from("Not found in scheme"))?;
         if message.msgid == 0 {
             return Err(Error::from("Message without msgid"));
         }
         let mut r = Map {
             map: MsgMap::new(),
-            key: Vec::<Field>::with_capacity(fields.len()),
+            key: Vec::<Field>::with_capacity(param.key.len()),
             key_size: 0,
+            erase: None,
             name: message.name.clone(),
         };
-        for fname in fields {
+        for fname in &param.key {
             let f = lookup_field(message, fname)?;
             check_field(&f)?;
             r.key_size += f.size;
             r.key.push(f);
+        }
+        if let Some((ename, evalue)) = &param.erase {
+            let f = lookup_field(message, &ename)?;
+            let buf = string2field(&f, evalue)?;
+            r.erase = Some(EraseKey { field: f, key: buf });
         }
         Ok((message.msgid, r))
     }
@@ -83,9 +103,83 @@ impl Map {
         for f in &self.key {
             key.put_slice(extract_field(f, msg.data())?);
         }
+
+        if let Some(erase) = &self.erase {
+            let ekey = extract_field(&erase.field, msg.data())?;
+            if ekey == erase.key {
+                self.map.remove(&key);
+                return Ok(());
+            }
+        }
+
         self.map.insert(key, Rc::new(Body::new(msg.into())));
         Ok(())
     }
+}
+
+pub fn parse_params(config: &tll::config::Config) -> Result<Vec<MapParam>> {
+    config
+        .browse("message.*")
+        .into_iter()
+        .map(|(key, cfg)| {
+            let name = &key["message.".len()..];
+            let (fstring, erase) = if let Some(v) = cfg.get_self() {
+                (v, None)
+            } else {
+                (
+                    cfg.get("key").ok_or(format!("Empty key for message {}", name))?,
+                    if let Some(ekey) = cfg.get("erase-key") {
+                        Some((
+                            ekey,
+                            cfg.get("erase-value").ok_or(format!("Empty erase-value for message {}", name))?,
+                        ))
+                    } else {
+                        None
+                    },
+                )
+            };
+            let fields: Vec<String> = fstring.split(",").map(|x| x.trim().to_owned()).collect();
+            for f in &fields {
+                if f == "" {
+                    return Err(Error::from(format!("Empty field name for message '{}'", name)));
+                }
+            }
+            Ok(MapParam {
+                name: name.to_owned(),
+                key: fields,
+                erase: erase,
+            })
+        })
+        .collect()
+}
+
+pub fn string2field(f: &Field, value: &str) -> Result<Vec<u8>> {
+    match &f.sub_type {
+        SubType::Enum(e) => {
+            let value = e
+                .values
+                .iter()
+                .find(|v| v.name == value)
+                .ok_or(format!("Value {} not found for enum {}", value, e.name))?;
+            string2field_raw(f, &value.value.to_string())
+        }
+        _ => string2field_raw(f, value),
+    }
+}
+
+pub fn string2field_raw(f: &Field, value: &str) -> Result<Vec<u8>> {
+    Ok(match &f.field_type {
+        Type::Int8 => value.parse::<i8>()?.to_le_bytes().to_vec(),
+        Type::Int16 => value.parse::<i16>()?.to_le_bytes().to_vec(),
+        Type::Int32 => value.parse::<i32>()?.to_le_bytes().to_vec(),
+        Type::Int64 => value.parse::<i64>()?.to_le_bytes().to_vec(),
+        Type::UInt8 => value.parse::<u8>()?.to_le_bytes().to_vec(),
+        Type::UInt16 => value.parse::<u16>()?.to_le_bytes().to_vec(),
+        Type::UInt32 => value.parse::<u32>()?.to_le_bytes().to_vec(),
+        Type::UInt64 => value.parse::<u64>()?.to_le_bytes().to_vec(),
+        Type::Double => value.parse::<f64>()?.to_le_bytes().to_vec(),
+        _ => return Err(Error::from("Invalid field type")),
+    })
 }
 
 pub fn extract_field<'a>(f: &Field, data: &'a [u8]) -> Result<&'a [u8]> {
